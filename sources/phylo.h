@@ -8,6 +8,7 @@
 #include <gsl/gsl_sf_bessel.h>
 #endif
 #include <cstdlib>
+#include <map>
 
 #define isnan std::isnan
 #define isinf std::isinf

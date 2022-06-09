@@ -622,6 +622,7 @@ class PhyloBayes	{
 		void				ResampleSubZip(Node* node, int site, ostream* os = 0);
 		void				ResampleSubMatrix(Node* node, int site, ostringstream* os = 0);
 		int				ResampleSubMatrixNielsen(Node* node, int site);
+		void 				WriteSuffStat(Node* node, int site, ostringstream* os = 0);
 		void				ResampleSubMatrixUni(Node* node, int site, ostringstream* os = 0);
 		void				ResampleSubMatrixUniZip(Node* node, int site);
 		void				ResampleSubCovUni(Node* node, int site, ostream* os = 0);
