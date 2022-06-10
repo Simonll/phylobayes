@@ -1390,6 +1390,387 @@ void PhyloBayes::ResampleSubMatrixConstant(int site)	{
 	}
 }
 
+void PhyloBayes::GlobalWriteSuffStat(Node* from, int site, ostream& os)	{
+
+	if(from->isLeaf()){
+
+	}else{
+		ostringstream ssleft;
+		GlobalWriteSuffStat(from->left,site,os);
+		
+
+		ostringstream ssright;
+		GlobalWriteSuffStat(from->right,site,os);
+		
+	}
+	if(from->isRoot()){
+		os << "\n";   
+	} else {
+
+		char* alphabet = mParam->Alphabet;
+		double* statbeta = SiteStatBeta[site];
+		double* relratebeta = SiteRelRateBeta[site];
+		int* relratensub = SiteRelRateNsub[site];
+		double** rrfactor = 0;
+		if (mParam->Qmode)	{
+			rrfactor = SiteRRFactor[site];
+		}
+		double* gwnsub = 0;
+		double** gwstatbeta = 0;
+		double** nucstatbeta = 0;
+		int** gwdoublensub = 0;
+		if (mParam->MutMode || (mParam->ZipGTR == 4))	{
+			gwnsub = GWNsub[site];
+			gwstatbeta = GWStatBeta[site];
+			nucstatbeta = NucStatBeta[site];
+			gwdoublensub = GWDoubleNsub[site];
+		}
+
+		// pick out the subtitution process operating at the current site
+		double effrate = *BaseRateFactor[site] * *BaseRate[site] * *BaseGeneRate[site];
+
+		int j = from->label;
+
+		SubMatrix* mat = BaseMatrix[site];
+		int Nstate = mat->Nstate;
+
+		if (mParam->NH)	{
+			mat = mNHMatrixArray[Mode[site]][NHcat[j]];
+		}
+		double* rr = mat->mRelativeRate;
+		double* stat = mat->GetStationaries();
+		double* statgw0 = 0;
+		if (mParam->MutMode)	{
+			statgw0 = mat->mStationary0;
+		}
+
+		EffLength[j][site] = 0;
+		if (BranchSiteTotalTrueSub)	{
+			BranchSiteTotalTrueSub[j][site] = 0;
+		}
+
+		int* nhnsub = 0;
+		double* nhstatbeta = 0;
+		if (mParam->NH)	{
+			nhnsub = NHNsub[j][site];
+			for (int k=0; k<Nstate; k++)	{
+				nhnsub[k] = 0;
+			}
+			nhstatbeta = NHStatBeta[j][site];
+			for (int k=0; k<Nstate; k++)	{
+				nhstatbeta[k] = 0;
+			}
+		}
+
+		if (! tree[j].isRoot() )	{
+			int dup = State[tree[j].up->label][site];
+			int ddown = State[j][site];
+
+			double efflength = BaseBL[site][j] * BaseBLMul[site][j];		
+			double ratio = effrate * efflength;
+
+			double* diag = taux2;
+			double* Q = mat->v;
+			for (int k=0; k<Nstate; k++)	{
+				*(diag++) = exp(ratio * *(Q++));
+				*(taux++) = 0;
+			}
+			taux -= Nstate;
+			diag -= Nstate;
+
+			double* P = mat->u[0];
+			double* invP = mat->invu[0] + dup;
+			for (int l=0; l<Nstate; l++)	{
+				for (int k=0; k<Nstate; k++)	{
+					*taux += *invP * *(diag++) * *(P++);
+					invP += Nstate;
+				}
+				invP -= Nstate*Nstate;
+				diag -= Nstate;
+				taux++;
+			}
+			taux -= Nstate;
+			double Z = taux[ddown];
+
+			double mu = mat->UniMu;
+			double fact = exp(-ratio * mu);
+			int m = 0;
+			double total = (dup==ddown) * fact;
+			double q = Random::Uniform() * Z;
+
+			while ((m<mParam->UniSubNmax) && (total < q)) 	{
+				m++;
+				fact *= mu * ratio / m;
+				total += mat->Power(m,dup,ddown) * fact;
+				if ((total-Z)>1e-6)	{
+					cerr << "error in resample sub matrix: normalising constant\n";
+					// exit(1);
+				}
+			}
+			if (m >= mParam->UniSubNmax)	{
+				mParam->SubOverflowCount ++;
+			}
+			if (m > mParam->ObservedUniSubNmax)	{
+				mParam->ObservedUniSubNmax = m;
+			}
+
+			int pathstate[m+1];
+			double pathtime[m+1];
+			double y[m+1];
+			for (int r=0; r<m; r++)	{
+				y[r] = Random::Uniform();
+			}
+			y[m] = 1;
+			for (int r=0; r<m; r++)	{
+				for (int s=m-1; s>r; s--)	{
+					if (y[s-1] > y[s])	{
+						double tmp = y[s-1];
+						y[s-1] = y[s];
+						y[s] = tmp;
+					}
+				}
+			}
+
+			double dt = efflength * y[0];
+			double du = effrate * efflength * y[0];
+			int d = dup;
+			pathstate[0] = d;
+			int ntruesub = 0;
+			for (int r=0; r<m; r++)	{
+				if (y[r] > y[r+1])	{
+					cerr << "error in ordering\n";
+					exit(1);
+				}
+				int k = 0;
+				if (r== m-1)	{
+					k = ddown;
+				}
+				else	{
+					double tot = 0;
+					double p[Nstate];
+					for (int l=0; l<Nstate; l++)	{
+						tot += mat->Power(1,d,l) * mat->Power(m-r-1,l,ddown);
+						p[l] = tot;
+					}
+
+					double s = tot * Random::Uniform();
+					while ((k<Nstate) && (s > p[k]))	{
+						k++;
+					}
+					if (k == Nstate)	{
+						cerr << "error in Sample sub\n";
+						exit(1);
+					}
+				}
+				if (k != d)	{
+					Nsub[site][k]++;
+					if (mParam->NH)	{
+						nhnsub[k]++;
+					}
+					if (mParam->MutMode || (mParam->ZipGTR == 4))	{
+						gwnsub[k] += GWf;
+						gwnsub[d] -= (1 - GWf);
+						gwdoublensub[d][k] ++;
+					}
+					BranchSiteTotalSub[j][site] ++;
+					if (BranchSiteTotalTrueSub)	{
+						BranchSiteTotalTrueSub[j][site]++;
+					}
+					if (TrueSub)	{
+						TrueSub[site][k] ++;
+					}
+					TotalSub[site] ++;
+					if (countmultiplesub)	{
+						if (forelastsub != -1)	{
+							NTripleSub[site][forelastsub][lastsub][k]++;
+						}
+						if (lastsub != -1)	{
+							NDoubleSub[site][lastsub][k]++;
+						}
+						forelastsub = lastsub;
+						lastsub = k;
+					}
+					
+					EffLength[j][site] -= dt * (*mat)(d,d);
+					/*
+					if (isnan(EffLength[j][site]))	{
+						cerr << dt << '\t' << (*mat)(d,d) << '\n';
+						exit(1);
+					}
+					*/
+
+					// increment stat beta
+					if (mParam->ZipGTR == 4)	{
+						for (int l=0; l<d; l++)	{
+							nucstatbeta[d][l] += dt;
+						}
+						for (int l=d+1; l<Nstate; l++)	{
+							nucstatbeta[d][l] += dt;
+						}
+					}
+					else if (mParam->MutMode)	{
+						for (int l=0; l<d; l++)	{
+							gwstatbeta[d][l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
+							nucstatbeta[d][l] += dt;
+							relratebeta[(2 * Nstate - l - 1) * l / 2 + d - l - 1] += statgw0[l] * mat->SelectionFactor(d,l) * dt;
+						}
+						for (int l=d+1; l<Nstate; l++)	{
+							gwstatbeta[d][l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
+							nucstatbeta[d][l] += dt;
+							relratebeta[(2 * Nstate - d - 1) * d / 2 + l - d - 1] += statgw0[l] * mat->SelectionFactor(d,l) * dt;
+						}
+					}
+					else	{
+						for (int l=0; l<d; l++)	{
+							statbeta[l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
+							if (mParam->NH)	{
+								nhstatbeta[l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
+							}
+							relratebeta[(2 * Nstate - l - 1) * l / 2 + d - l - 1] += stat[l] * dt;
+						}
+						for (int l=d+1; l<Nstate; l++)	{
+							statbeta[l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
+							if (mParam->NH)	{
+								nhstatbeta[l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
+							}
+							relratebeta[(2 * Nstate - d - 1) * d / 2 + l - d - 1] += stat[l] * dt;
+						}
+					}
+
+					if (rrfactor)	{
+						for (int l=0; l<Nstate; l++)	{
+							if (d != l)	{
+								rrfactor[d][l] += dt;
+							}
+						}
+					}
+
+					// increment relrate count and beta
+					if (d < k)	{
+						relratensub[(2 * Nstate - d - 1) * d / 2 + k - d - 1] ++;
+					}
+					else	{
+						relratensub[(2 * Nstate - k - 1) * k / 2 + d - k - 1] ++;
+					}
+					pathtime[ntruesub] = dt;
+					ntruesub++;
+					pathstate[ntruesub] = k;
+					dt = 0;
+				}
+				if (TrueSub)	{
+					TimeSpent[site][d] += du;
+				}
+				du = efflength * (y[r+1] - y[r]);
+				d = k;
+				dt += efflength * (y[r+1] - y[r]);
+
+			}
+			if (TrueSub)	{
+				TimeSpent[site][d] += du;
+			}
+			pathtime[ntruesub] = dt;
+			EffLength[j][site] -= dt * (*mat)(d,d);
+			/*
+			if (isnan(EffLength[j][site]))	{
+				cerr << dt << '\t' << (*mat)(d,d) << '\n';
+				exit(1);
+			}
+			*/
+
+			// increment stat beta
+			if (mParam->ZipGTR == 4)	{
+				for (int l=0; l<d; l++)	{
+					nucstatbeta[d][l] += dt;
+				}
+				for (int l=d+1; l<Nstate; l++)	{
+					nucstatbeta[d][l] += dt;
+				}
+			}
+			else if (mParam->MutMode)	{
+				for (int l=0; l<d; l++)	{
+					gwstatbeta[d][l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
+					nucstatbeta[d][l] += dt;
+					relratebeta[(2 * Nstate - l - 1) * l / 2 + d - l - 1] += statgw0[l] * mat->SelectionFactor(d,l) * dt;
+				}
+				for (int l=d+1; l<Nstate; l++)	{
+					gwstatbeta[d][l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
+					nucstatbeta[d][l] += dt;
+					relratebeta[(2 * Nstate - d - 1) * d / 2 + l - d - 1] += statgw0[l] * mat->SelectionFactor(d,l) * dt;
+				}
+			}
+			else	{
+				for (int l=0; l<d; l++)	{
+					statbeta[l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
+					if (mParam->NH)	{
+						nhstatbeta[l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
+					}
+					relratebeta[(2 * Nstate - l - 1) * l / 2 + d - l - 1] += stat[l] * dt;
+				}
+				for (int l=d+1; l<Nstate; l++)	{
+					statbeta[l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
+					if (mParam->NH)	{
+						nhstatbeta[l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
+					}
+					relratebeta[(2 * Nstate - d - 1) * d / 2 + l - d - 1] += stat[l] * dt;
+				}
+			}
+			if (rrfactor)	{
+				for (int l=0; l<Nstate; l++)	{
+					if (d != l)	{
+						rrfactor[d][l] += dt;
+					}
+				}
+			}
+			SiteEffLength[site] += EffLength[j][site] * *BaseRateFactor[site] * *BaseGeneRate[site];
+
+			EffLength[j][site] /= efflength;
+			if (fabs(efflength) < 1e-8)	{
+				EffLength[j][site] = 0;
+			}
+			if (os)	{
+				std::map<std::pair<char,char>, int> branchpaircount; 
+				std::map<char,double> branchwaitingtime;
+				char state_from = alphabet[pathstate[0]];
+				// if (mParam->RedundantPath)	{
+				// 	// (*os) << alphabet[pathstate[ntruesub]];
+				// 	state_from = alphabet[pathstate[0]];
+				// }
+				double dt = alphabet[pathstate[0]];
+				if (ntruesub>0){
+					for (int k=1; k<ntruesub; k++)	{
+						// (*os) << ':' << pathtime[k];
+						char state_to = alphabet[pathstate[k]];
+						dt = pathtime[k];
+						// (*os) << ':' << alphabet[pathstate[k]];
+						branchpaircount[pair<int,int>(state_from, state_to)]++;
+						branchwaitingtime[state_from]+= dt; 
+						state_from = state_to;
+					
+					}
+				}
+				else {
+					branchwaitingtime[state_from] += dt;
+
+				}
+
+				os << from->label;
+				for(int k = 0; k < Nstate; k++){
+					os << "\t" << branchwaitingtime[k];
+				}
+				for(int k = 0; k < Nstate; k++){
+					for(int l = 0; l < Nstate; l++){
+						if (k != l ){
+							os << "\t" << branchpaircount[pair<int,int>(k, l)];
+						}
+					}
+		}
+		os << "\n";
+
+			}
+		}
+	}
+}
+
 void PhyloBayes::ResampleSubMatrix(Node* node, int site, ostringstream* os)	{
 
 	if (os)	{
@@ -1788,390 +2169,6 @@ void PhyloBayes::ResampleSubMatrixUni(Node* node, int site, ostringstream* os)	{
 		}
 		if (os)	{
 			(*os) << alphabet[State[j][site]];
-		}
-	}
-	for (int l=0; l<Nstate; l++)	{
-		if (mParam->NH)	{
-			nhstatbeta[l] *= effrate;
-		}
-	}
-}
-
-void PhyloBayes::WriteSuffStat(Node* node, int site, ostringstream* os)	{
-
-	char* alphabet = mParam->Alphabet;
-	if (os)	{
-		if (node->isLeaf())	{
-			// (*os) << mParam->SpeciesNames[node->label];
-			// if (mParam->RedundantPath)	{
-			// 	(*os) << '_';
-			// }
-			// else 	{
-			// 	(*os) << ':';
-			// }
-		}
-	}
-
-	double* statbeta = SiteStatBeta[site];
-	double* relratebeta = SiteRelRateBeta[site];
-	int* relratensub = SiteRelRateNsub[site];
-	double** rrfactor = 0;
-	if (mParam->Qmode)	{
-		rrfactor = SiteRRFactor[site];
-	}
-	double* gwnsub = 0;
-	double** gwstatbeta = 0;
-	double** nucstatbeta = 0;
-	int** gwdoublensub = 0;
-	if (mParam->MutMode || (mParam->ZipGTR == 4))	{
-		gwnsub = GWNsub[site];
-		gwstatbeta = GWStatBeta[site];
-		nucstatbeta = NucStatBeta[site];
-		gwdoublensub = GWDoubleNsub[site];
-	}
-
-	// pick out the subtitution process operating at the current site
-	double effrate = *BaseRateFactor[site] * *BaseRate[site] * *BaseGeneRate[site];
-
-	int j = node->label;
-
-	SubMatrix* mat = BaseMatrix[site];
-	int Nstate = mat->Nstate;
-
-	if (mParam->NH)	{
-		mat = mNHMatrixArray[Mode[site]][NHcat[j]];
-	}
-	double* rr = mat->mRelativeRate;
-	double* stat = mat->GetStationaries();
-	double* statgw0 = 0;
-	if (mParam->MutMode)	{
-		statgw0 = mat->mStationary0;
-	}
-
-	EffLength[j][site] = 0;
-	if (BranchSiteTotalTrueSub)	{
-		BranchSiteTotalTrueSub[j][site] = 0;
-	}
-
-	int* nhnsub = 0;
-	double* nhstatbeta = 0;
-	if (mParam->NH)	{
-		nhnsub = NHNsub[j][site];
-		for (int k=0; k<Nstate; k++)	{
-			nhnsub[k] = 0;
-		}
-		nhstatbeta = NHStatBeta[j][site];
-		for (int k=0; k<Nstate; k++)	{
-			nhstatbeta[k] = 0;
-		}
-	}
-
-	if (! tree[j].isRoot() )	{
-		int dup = State[tree[j].up->label][site];
-		int ddown = State[j][site];
-
-		double efflength = BaseBL[site][j] * BaseBLMul[site][j];		
-		double ratio = effrate * efflength;
-
-		double* diag = taux2;
-		double* Q = mat->v;
-		for (int k=0; k<Nstate; k++)	{
-			*(diag++) = exp(ratio * *(Q++));
-			*(taux++) = 0;
-		}
-		taux -= Nstate;
-		diag -= Nstate;
-
-		double* P = mat->u[0];
-		double* invP = mat->invu[0] + dup;
-		for (int l=0; l<Nstate; l++)	{
-			for (int k=0; k<Nstate; k++)	{
-				*taux += *invP * *(diag++) * *(P++);
-				invP += Nstate;
-			}
-			invP -= Nstate*Nstate;
-			diag -= Nstate;
-			taux++;
-		}
-		taux -= Nstate;
-		double Z = taux[ddown];
-
-		double mu = mat->UniMu;
-		double fact = exp(-ratio * mu);
-		int m = 0;
-		double total = (dup==ddown) * fact;
-		double q = Random::Uniform() * Z;
-
-		while ((m<mParam->UniSubNmax) && (total < q)) 	{
-			m++;
-			fact *= mu * ratio / m;
-			total += mat->Power(m,dup,ddown) * fact;
-			if ((total-Z)>1e-6)	{
-				cerr << "error in resample sub matrix: normalising constant\n";
-				// exit(1);
-			}
-		}
-		if (m >= mParam->UniSubNmax)	{
-			mParam->SubOverflowCount ++;
-		}
-		if (m > mParam->ObservedUniSubNmax)	{
-			mParam->ObservedUniSubNmax = m;
-		}
-
-		int pathstate[m+1];
-		double pathtime[m+1];
-		double y[m+1];
-		for (int r=0; r<m; r++)	{
-			y[r] = Random::Uniform();
-		}
-		y[m] = 1;
-		for (int r=0; r<m; r++)	{
-			for (int s=m-1; s>r; s--)	{
-				if (y[s-1] > y[s])	{
-					double tmp = y[s-1];
-					y[s-1] = y[s];
-					y[s] = tmp;
-				}
-			}
-		}
-
-		double dt = efflength * y[0];
-		double du = effrate * efflength * y[0];
-		int d = dup;
-		pathstate[0] = d;
-		int ntruesub = 0;
-		for (int r=0; r<m; r++)	{
-			if (y[r] > y[r+1])	{
-				cerr << "error in ordering\n";
-				exit(1);
-			}
-			int k = 0;
-			if (r== m-1)	{
-				k = ddown;
-			}
-			else	{
-				double tot = 0;
-				double p[Nstate];
-				for (int l=0; l<Nstate; l++)	{
-					tot += mat->Power(1,d,l) * mat->Power(m-r-1,l,ddown);
-					p[l] = tot;
-				}
-
-				double s = tot * Random::Uniform();
-				while ((k<Nstate) && (s > p[k]))	{
-					k++;
-				}
-				if (k == Nstate)	{
-					cerr << "error in Sample sub\n";
-					exit(1);
-				}
-			}
-			if (k != d)	{
-				Nsub[site][k]++;
-				if (mParam->NH)	{
-					nhnsub[k]++;
-				}
-				if (mParam->MutMode || (mParam->ZipGTR == 4))	{
-					gwnsub[k] += GWf;
-					gwnsub[d] -= (1 - GWf);
-					gwdoublensub[d][k] ++;
-				}
-				BranchSiteTotalSub[j][site] ++;
-				if (BranchSiteTotalTrueSub)	{
-					BranchSiteTotalTrueSub[j][site]++;
-				}
-				if (TrueSub)	{
-					TrueSub[site][k] ++;
-				}
-				TotalSub[site] ++;
-				if (countmultiplesub)	{
-					if (forelastsub != -1)	{
-						NTripleSub[site][forelastsub][lastsub][k]++;
-					}
-					if (lastsub != -1)	{
-						NDoubleSub[site][lastsub][k]++;
-					}
-					forelastsub = lastsub;
-					lastsub = k;
-				}
-				
-				EffLength[j][site] -= dt * (*mat)(d,d);
-				/*
-				if (isnan(EffLength[j][site]))	{
-					cerr << dt << '\t' << (*mat)(d,d) << '\n';
-				 	exit(1);
-				}
-				*/
-
-				// increment stat beta
-				if (mParam->ZipGTR == 4)	{
-					for (int l=0; l<d; l++)	{
-						nucstatbeta[d][l] += dt;
-					}
-					for (int l=d+1; l<Nstate; l++)	{
-						nucstatbeta[d][l] += dt;
-					}
-				}
-				else if (mParam->MutMode)	{
-					for (int l=0; l<d; l++)	{
-						gwstatbeta[d][l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
-						nucstatbeta[d][l] += dt;
-						relratebeta[(2 * Nstate - l - 1) * l / 2 + d - l - 1] += statgw0[l] * mat->SelectionFactor(d,l) * dt;
-					}
-					for (int l=d+1; l<Nstate; l++)	{
-						gwstatbeta[d][l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
-						nucstatbeta[d][l] += dt;
-						relratebeta[(2 * Nstate - d - 1) * d / 2 + l - d - 1] += statgw0[l] * mat->SelectionFactor(d,l) * dt;
-					}
-				}
-				else	{
-					for (int l=0; l<d; l++)	{
-						statbeta[l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
-						if (mParam->NH)	{
-							nhstatbeta[l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
-						}
-						relratebeta[(2 * Nstate - l - 1) * l / 2 + d - l - 1] += stat[l] * dt;
-					}
-					for (int l=d+1; l<Nstate; l++)	{
-						statbeta[l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
-						if (mParam->NH)	{
-							nhstatbeta[l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
-						}
-						relratebeta[(2 * Nstate - d - 1) * d / 2 + l - d - 1] += stat[l] * dt;
-					}
-				}
-
-				if (rrfactor)	{
-					for (int l=0; l<Nstate; l++)	{
-						if (d != l)	{
-							rrfactor[d][l] += dt;
-						}
-					}
-				}
-
-				// increment relrate count and beta
-				if (d < k)	{
-					relratensub[(2 * Nstate - d - 1) * d / 2 + k - d - 1] ++;
-				}
-				else	{
-					relratensub[(2 * Nstate - k - 1) * k / 2 + d - k - 1] ++;
-				}
-				pathtime[ntruesub] = dt;
-				ntruesub++;
-				pathstate[ntruesub] = k;
-				dt = 0;
-			}
-			if (TrueSub)	{
-				TimeSpent[site][d] += du;
-			}
-			du = efflength * (y[r+1] - y[r]);
-			d = k;
-			dt += efflength * (y[r+1] - y[r]);
-
-		}
-		if (TrueSub)	{
-			TimeSpent[site][d] += du;
-		}
-		pathtime[ntruesub] = dt;
-		EffLength[j][site] -= dt * (*mat)(d,d);
-		/*
-		if (isnan(EffLength[j][site]))	{
-			cerr << dt << '\t' << (*mat)(d,d) << '\n';
-			exit(1);
-		}
-		*/
-
-		// increment stat beta
-		if (mParam->ZipGTR == 4)	{
-			for (int l=0; l<d; l++)	{
-				nucstatbeta[d][l] += dt;
-			}
-			for (int l=d+1; l<Nstate; l++)	{
-				nucstatbeta[d][l] += dt;
-			}
-		}
-		else if (mParam->MutMode)	{
-			for (int l=0; l<d; l++)	{
-				gwstatbeta[d][l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
-				nucstatbeta[d][l] += dt;
-				relratebeta[(2 * Nstate - l - 1) * l / 2 + d - l - 1] += statgw0[l] * mat->SelectionFactor(d,l) * dt;
-			}
-			for (int l=d+1; l<Nstate; l++)	{
-				gwstatbeta[d][l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
-				nucstatbeta[d][l] += dt;
-				relratebeta[(2 * Nstate - d - 1) * d / 2 + l - d - 1] += statgw0[l] * mat->SelectionFactor(d,l) * dt;
-			}
-		}
-		else	{
-			for (int l=0; l<d; l++)	{
-				statbeta[l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
-				if (mParam->NH)	{
-					nhstatbeta[l] += rr[(2 * Nstate - l - 1) * l / 2 + d - l - 1] * dt;
-				}
-				relratebeta[(2 * Nstate - l - 1) * l / 2 + d - l - 1] += stat[l] * dt;
-			}
-			for (int l=d+1; l<Nstate; l++)	{
-				statbeta[l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
-				if (mParam->NH)	{
-					nhstatbeta[l] += rr[(2 * Nstate - d - 1) * d / 2 + l - d - 1] * dt;
-				}
-				relratebeta[(2 * Nstate - d - 1) * d / 2 + l - d - 1] += stat[l] * dt;
-			}
-		}
-		if (rrfactor)	{
-			for (int l=0; l<Nstate; l++)	{
-				if (d != l)	{
-					rrfactor[d][l] += dt;
-				}
-			}
-		}
-		SiteEffLength[site] += EffLength[j][site] * *BaseRateFactor[site] * *BaseGeneRate[site];
-
-		EffLength[j][site] /= efflength;
-		if (fabs(efflength) < 1e-8)	{
-			EffLength[j][site] = 0;
-		}
-		if (os)	{
-			std::map<std::pair<char,char>, int> branchpaircount; 
-			std::map<char,double> branchwaitingtime;
-			char state_from; 
-			if (mParam->RedundantPath)	{
-				// (*os) << alphabet[pathstate[ntruesub]];
-				state_from = alphabet[pathstate[0]];
-			}
-			for (int k=0; k<ntruesub; k++)	{
-				// (*os) << ':' << pathtime[k];
-				double t = pathtime[k];
-				char state_to;
-				if (k || mParam->RedundantPath)	{
-					// (*os) << ':' << alphabet[pathstate[k]];
-					state_to = alphabet[pathstate[k]];
-					branchwaitingtime[state_from]+= t; 
-					branchpaircount[pair<int,int>(state_from, state_to)]++;
-					state_from = state_to;
-				}
-			}
-		}
-	}
-	else	{
-		BranchSiteTotalSub[j][site]++;
-		Nsub[site][State[j][site]]++;
-		if (TrueSub)	{
-			TrueSub[site][State[j][site]] ++;
-		}
-		if (mParam->NH)	{
-			nhnsub[State[j][site]]++;
-		}
-		if (mParam->MutMode || (mParam->ZipGTR == 4))	{
-			GWRootNsub[site][State[j][site]]++;
-		}
-		TotalSub[site]++;
-		if (countmultiplesub)	{
-			lastsub = State[j][site];
-		}
-		if (os)	{
-			// (*os) << alphabet[State[j][site]];
-			(*os) << "\n";
 		}
 	}
 	for (int l=0; l<Nstate; l++)	{
